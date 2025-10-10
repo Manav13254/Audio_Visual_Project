@@ -20,7 +20,7 @@ torch.manual_seed(SEED)
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-BASE_DIR = Path("../preprocessed_features")
+BASE_DIR = Path("/home/23ucs671/audio_visual_proj1/preprocessed_features_80_20")
 TRAIN_DIR = BASE_DIR / "train"
 VAL_DIR = BASE_DIR / "val"
 CHECKPOINT_PATH = "best_finetuned_rn18_model(offline).pt"
