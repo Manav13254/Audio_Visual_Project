@@ -1,6 +1,5 @@
 spectrogram_data/
 project/
-multimodal/
 final_data1/
 .ipynb_checkpoints/
 Advance dataset
@@ -8,3 +7,5 @@ Advance_dataset_split/
 __pycache__/
 *.pt
 *mlruns/
+best_lora_rn18_model/
+final_data_split/

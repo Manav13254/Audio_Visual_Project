@@ -6,7 +6,6 @@ from tqdm import tqdm
 from pathlib import Path
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-
 # --- NEW: Imports for Audio and Hugging Face ---
 import librosa
 from transformers import AutoProcessor, AutoModel
@@ -18,7 +17,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader, WeightedRandomSampler, Dataset
 import mlflow
 import mlflow.pytorch
-from sklearn.metrics import precision_score, recall_score, f1_score, confusion_matrix, classification_report, log_loss
+from sklearn.metrics import precision_score, recall_score, f1_score, classification_report, log_loss
 
 # ---------------- Config / Seed ----------------
 SEED = 42
@@ -27,6 +26,7 @@ np.random.seed(SEED)
 torch.manual_seed(SEED)
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
 # --- MODIFIED: Use CLAP backbone ---
 BACKBONE_NAME = "laion/clap-htsat-unfused"
 
@@ -34,7 +34,7 @@ BACKBONE_NAME = "laion/clap-htsat-unfused"
 TRAIN_DIR = "../final_data1/train/audio"
 VAL_DIR = "../final_data1/val/audio"
 
-BATCH_SIZE = 32 # You may need to lower this if you run out of GPU memory
+BATCH_SIZE = 32
 EPOCHS = 100
 LR = 1e-3
 WEIGHT_DECAY = 1e-2
@@ -44,8 +44,8 @@ DROPOUT = 0.5
 LABEL_SMOOTHING = 0.1
 
 # --- NEW: Audio specific config ---
-SAMPLE_RATE = 48000 # Required sample rate for the CLAP model
-AUDIO_DURATION_S = 10 # Duration to pad/truncate audio to (in seconds)
+SAMPLE_RATE = 48000  # CLAP expected sample rate
+AUDIO_DURATION_S = 10
 N_SAMPLES = AUDIO_DURATION_S * SAMPLE_RATE
 
 CHECKPOINT_PATH = "best_clap_linear_head_checkpoint.pt"
@@ -56,16 +56,16 @@ processor = AutoProcessor.from_pretrained(BACKBONE_NAME)
 clap_model = AutoModel.from_pretrained(BACKBONE_NAME, use_safetensors=True).to(DEVICE)
 clap_model.eval()
 
-# --- NEW: Custom Audio Dataset ---
+# ---------------- Dataset ----------------
 class AudioFolderDataset(Dataset):
     def __init__(self, root_dir, target_sr, target_samples):
         self.root_dir = Path(root_dir)
         self.target_sr = target_sr
         self.target_samples = target_samples
-        
+
         self.classes = sorted([d.name for d in self.root_dir.iterdir() if d.is_dir()])
         self.class_to_idx = {cls_name: i for i, cls_name in enumerate(self.classes)}
-        
+
         self.samples = []
         audio_extensions = ['.wav', '.mp3', '.flac', '.ogg']
         for class_name in self.classes:
@@ -79,53 +79,64 @@ class AudioFolderDataset(Dataset):
 
     def __getitem__(self, idx):
         audio_path, label = self.samples[idx]
-        
-        # Load audio and resample if necessary
         waveform, sr = librosa.load(audio_path, sr=self.target_sr, mono=True)
-        
-        # Pad or truncate to target length
         if len(waveform) > self.target_samples:
             waveform = waveform[:self.target_samples]
         else:
             waveform = np.pad(waveform, (0, self.target_samples - len(waveform)), 'constant')
-            
         return waveform, label
 
-# --- NEW: Collate function to apply processor to a batch ---
+# --- Collate function ---
 def collate_fn(batch):
     waveforms, labels = zip(*batch)
+    # processor returns tensors with key 'input_features' for CLAP audio
     inputs = processor(audios=list(waveforms), sampling_rate=SAMPLE_RATE, return_tensors="pt", padding=True)
-    inputs['labels'] = torch.tensor(labels)
+    inputs['labels'] = torch.tensor(labels, dtype=torch.long)
     return inputs
 
-# ---------------- Datasets & Sampler ----------------
+# ---------------- Dataloaders ----------------
 train_ds = AudioFolderDataset(TRAIN_DIR, target_sr=SAMPLE_RATE, target_samples=N_SAMPLES)
-val_ds   = AudioFolderDataset(VAL_DIR, target_sr=SAMPLE_RATE, target_samples=N_SAMPLES)
+val_ds = AudioFolderDataset(VAL_DIR, target_sr=SAMPLE_RATE, target_samples=N_SAMPLES)
 
 labels = [label for _, label in train_ds.samples]
 class_counts = Counter(labels)
 num_samples = len(train_ds)
+if num_samples == 0:
+    raise RuntimeError(f"No training samples found in {TRAIN_DIR}. Check paths and folder structure.")
 class_weights = {c: 1.0 / cnt for c, cnt in class_counts.items()}
 sample_weights = [class_weights[label] for label in labels]
 sampler = WeightedRandomSampler(sample_weights, num_samples=num_samples, replacement=True)
 
 train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=sampler, collate_fn=collate_fn)
-val_loader   = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn)
+val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn)
 
 NUM_CLASSES = len(train_ds.classes)
+if NUM_CLASSES == 0:
+    raise RuntimeError(f"No class folders found in {TRAIN_DIR}.")
 
-# --- MODIFIED: CLAP Model with Classification Head ---
+# ---------------- Model ----------------
 class CLAPClassificationHead(nn.Module):
-    def __init__(self, clap_model, n_cls, dropout_rate=0.5):
+    def __init__(self, clap_model, processor, n_cls, dropout_rate=0.5):
         super().__init__()
         self.clap = clap_model
-        
+        self.processor = processor
+
+        # Freeze entire CLAP backbone
         for param in self.clap.parameters():
             param.requires_grad = False
-            
-        proj_dim = self.clap.config.audio_config.hidden_size # Get output dim from config
-        hidden_dim = proj_dim // 2
-        
+
+        # Build a dummy waveform, run through processor, then through clap.get_audio_features to infer proj_dim
+        with torch.no_grad():
+            # dummy waveform numpy array (silence)
+            dummy_wav = np.zeros(N_SAMPLES, dtype=np.float32)
+            proc = self.processor(audios=[dummy_wav], sampling_rate=SAMPLE_RATE, return_tensors="pt", padding=True)
+            # processor's 'input_features' is what's fed into clap.get_audio_features
+            input_feats = proc['input_features'].to(next(self.clap.parameters()).device)
+            audio_embed = self.clap.get_audio_features(input_feats)  # shape: (1, proj_dim)
+            proj_dim = audio_embed.shape[-1]
+
+        hidden_dim = max(proj_dim // 2, 128)  # ensure a reasonable hidden size
+
         self.head = nn.Sequential(
             nn.Linear(proj_dim, hidden_dim),
             nn.ReLU(inplace=True),
@@ -134,13 +145,14 @@ class CLAPClassificationHead(nn.Module):
         )
 
     def forward(self, input_features):
+        # input_features is expected to be the processor output tensor ('input_features')
         audio_features = self.clap.get_audio_features(input_features)
         return self.head(audio_features)
 
-# ---------------- Instantiate Model ----------------
-model = CLAPClassificationHead(clap_model, NUM_CLASSES, dropout_rate=DROPOUT).to(DEVICE)
+# ---------------- Instantiate model ----------------
+model = CLAPClassificationHead(clap_model, processor, NUM_CLASSES, dropout_rate=DROPOUT).to(DEVICE)
 
-# Ensure only the head is trainable
+# Ensure only head is trainable
 for name, param in model.named_parameters():
     if 'head' in name:
         param.requires_grad = True
@@ -151,13 +163,13 @@ trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
 total = sum(p.numel() for p in model.parameters())
 print(f"Trainable params: {trainable:,} / {total:,} ({100.0*trainable/total:.2f}%)")
 
-# ---------------- Optimizer / Loss / AMP / Scheduler ----------------
+# ---------------- Optimizer / Loss / Scheduler ----------------
 criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
 optimizer = optim.AdamW(model.head.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
 scaler = torch.amp.GradScaler(enabled=(DEVICE == "cuda"))
 scheduler = CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
-# --- MODIFIED: Evaluation Functions for CLAP ---
+# ---------------- Evaluation ----------------
 @torch.no_grad()
 def zero_shot_acc():
     clap_model.eval()
@@ -167,15 +179,16 @@ def zero_shot_acc():
         input_ids=text_inputs['input_ids'].to(DEVICE),
         attention_mask=text_inputs['attention_mask'].to(DEVICE)
     )
-    
+
     correct = total = 0
     for batch in val_loader:
+        # batch['input_features'] is on CPU; send to DEVICE
         audio_features = clap_model.get_audio_features(batch['input_features'].to(DEVICE))
         logits = (audio_features @ text_features.T)
         preds = logits.argmax(dim=-1)
         correct += (preds == batch['labels'].to(DEVICE)).sum().item()
         total += batch['labels'].size(0)
-    return 100.0 * correct / total
+    return 100.0 * correct / total if total > 0 else 0.0
 
 @torch.no_grad()
 def evaluate(net, print_report=False):
@@ -185,26 +198,25 @@ def evaluate(net, print_report=False):
     for batch in val_loader:
         input_features = batch['input_features'].to(DEVICE)
         labels = batch['labels'].to(DEVICE)
-        
-        with torch.amp.autocast(device_type=DEVICE):
+        with torch.amp.autocast(device_type="cuda" if DEVICE == "cuda" else "cpu"):
             out = net(input_features)
             loss = criterion(out, labels)
-            
         loss_sum += loss.item() * labels.size(0)
         probs = torch.nn.functional.softmax(out, dim=1)
         preds = out.argmax(dim=1)
-        
         all_preds.extend(preds.cpu().numpy())
         all_labels.extend(labels.cpu().numpy())
         probs_list.append(probs.cpu().numpy())
 
     total = len(all_labels)
+    if total == 0:
+        return float("inf"), 0.0, 0.0, 0.0, 0.0, float("inf")
     avg_loss = loss_sum / total
     acc = (np.array(all_preds) == np.array(all_labels)).sum() / total * 100.0
     probs_all = np.concatenate(probs_list, axis=0)
     prec = precision_score(all_labels, all_preds, average="weighted", zero_division=0)
-    rec  = recall_score(all_labels, all_preds, average="weighted", zero_division=0)
-    f1   = f1_score(all_labels, all_preds, average="weighted", zero_division=0)
+    rec = recall_score(all_labels, all_preds, average="weighted", zero_division=0)
+    f1 = f1_score(all_labels, all_preds, average="weighted", zero_division=0)
     logloss = log_loss(all_labels, probs_all, labels=list(range(NUM_CLASSES)))
 
     if print_report:
@@ -213,7 +225,7 @@ def evaluate(net, print_report=False):
 
     return avg_loss, acc, prec, rec, f1, logloss
 
-# ---------------- Training Loop ----------------
+# ---------------- Training ----------------
 mlflow.set_experiment("clap_htsat_linear_probe")
 with mlflow.start_run():
     mlflow.log_params({
@@ -238,16 +250,14 @@ with mlflow.start_run():
         running_samples = 0
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{EPOCHS}")
         for batch in pbar:
-            # --- MODIFIED: Get data from batch dictionary ---
             input_features = batch['input_features'].to(DEVICE)
             labels = batch['labels'].to(DEVICE)
-            
+
             optimizer.zero_grad()
-            
-            with torch.amp.autocast(device_type=DEVICE):
+            with torch.amp.autocast(device_type="cuda" if DEVICE == "cuda" else "cpu"):
                 out = model(input_features)
                 loss = criterion(out, labels)
-                
+
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
@@ -257,9 +267,8 @@ with mlflow.start_run():
             running_samples += labels.size(0)
             pbar.set_postfix(loss=f"{loss.item():.4f}", acc=f"{100*running_correct/running_samples:.2f}%")
 
-        train_loss = running_loss / running_samples
-        train_acc  = 100.0 * running_correct / running_samples
-        
+        train_loss = running_loss / running_samples if running_samples > 0 else float("inf")
+        train_acc = 100.0 * running_correct / running_samples if running_samples > 0 else 0.0
         val_loss, val_acc, val_prec, val_rec, val_f1, val_logloss = evaluate(model)
         scheduler.step()
 
@@ -287,7 +296,6 @@ with mlflow.start_run():
     if os.path.exists(CHECKPOINT_PATH):
         print(f"\nLoading best model from {CHECKPOINT_PATH} for final evaluation.")
         model.load_state_dict(torch.load(CHECKPOINT_PATH, map_location=DEVICE))
-        
         final_metrics = evaluate(model, print_report=True)
         mlflow.log_metrics({
             "final_val_loss": final_metrics[0], "final_val_acc": final_metrics[1],
@@ -296,4 +304,4 @@ with mlflow.start_run():
         })
         mlflow.pytorch.log_model(model, "clap_linear_head_model")
 
-print("\nDone.")
+print("\n✅ Training complete!")
