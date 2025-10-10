@@ -9,3 +9,7 @@ __pycache__/
 *mlruns/
 best_lora_rn18_model/
 final_data_split/
+preprocessed_features_80_20/
+final_data_split_80_20/
+sound/
+vision/

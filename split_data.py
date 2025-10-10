@@ -6,9 +6,9 @@ from pathlib import Path
 from collections import defaultdict
 from tqdm import tqdm
 
-AUDIO_SOURCE_DIR = Path(r"E:\Audio_Visual_Project\Advance dataset\ADVANCE_sound\sound")
-VISION_SOURCE_DIR = Path(r"E:\Audio_Visual_Project\Advance dataset\ADVANCE_vision\vision")
-OUTPUT_DIR = Path(r"E:\Audio_Visual_Project\final_data_split_80_20")
+AUDIO_SOURCE_DIR = Path(r"D:\machine learning\Audio_Visual_Project\sound")
+VISION_SOURCE_DIR = Path(r"D:\machine learning\Audio_Visual_Project\vision")
+OUTPUT_DIR = Path(r"D:\machine learning\Audio_Visual_Project\final_data_split_80_20")
 
 TRAIN_RATIO = 0.80
 VAL_RATIO = 0.20

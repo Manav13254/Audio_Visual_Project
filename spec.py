@@ -4,8 +4,8 @@ import librosa
 from pathlib import Path
 from tqdm import tqdm
 
-RAW_DATA_DIR = Path(r"E:\Audio_Visual_Project\final_data_split_80_20")
-FEATURES_OUTPUT_DIR = Path(r"E:\Audio_Visual_Project\preprocessed_features_80_20")
+RAW_DATA_DIR = Path(r"D:\machine learning\Audio_Visual_Project\final_data_split_80_20")
+FEATURES_OUTPUT_DIR = Path(r"D:\machine learning\Audio_Visual_Project\preprocessed_features_80_20")
 
 SAMPLE_RATE = 16000
 N_FFT = 4096
