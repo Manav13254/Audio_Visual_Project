@@ -20,14 +20,11 @@ torch.manual_seed(SEED)
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-# --- MODIFIED: Point to the new PRE-PROCESSED feature directories ---
 BASE_DIR = Path("../preprocessed_features")
 TRAIN_DIR = BASE_DIR / "train"
 VAL_DIR = BASE_DIR / "val"
-TEST_DIR = BASE_DIR / "test"
 CHECKPOINT_PATH = "best_finetuned_rn18_model(offline).pt"
 
-# --- MODIFIED: Load the normalizer statistics ---
 normalizer = np.load(BASE_DIR / "normalizer.npy")
 mu, sigma = normalizer[0], normalizer[1]
 
@@ -40,7 +37,6 @@ PATIENCE = 15
 MIN_DELTA = 5e-4
 
 # ----------------- Data Transforms (for Tensors) -----------------
-# These transforms are applied AFTER the .npy file is loaded
 IMAGE_NET_MEAN = [0.485, 0.456, 0.406]
 IMAGE_NET_STD = [0.229, 0.224, 0.225]
 
@@ -56,9 +52,6 @@ val_transform = transforms.Compose([
     transforms.Normalize(mean=IMAGE_NET_MEAN, std=IMAGE_NET_STD)
 ])
 
-test_transform = val_transform
-
-# --- MODIFIED: Custom Dataset for loading .npy files ---
 class OfflineAudioDataset(Dataset):
     def __init__(self, root_dir, transform=None):
         self.transform = transform
@@ -84,26 +77,16 @@ class OfflineAudioDataset(Dataset):
     def __getitem__(self, index):
         feature_path, label = self.samples[index]
         
-        # 1. Load pre-processed spectrogram
         sound = np.load(feature_path)
-        
-        # 2. Apply pre-calculated normalization
         sound = (sound - mu) / sigma
+        sound = torch.from_numpy(sound).unsqueeze(0)
+        sound = sound.expand(3, -1, -1)
         
-        # 3. Convert to tensor and add channel dimension for image transforms
-        sound = torch.from_numpy(sound).unsqueeze(0) # Shape: [1, 400, 64]
-        
-        # 4. Expand to 3 channels for ResNet
-        sound = sound.expand(3, -1, -1) # Shape: [3, 400, 64]
-        
-        # 5. Apply transforms (resize, augmentations, etc.)
         if self.transform:
-            sound = self.transform(sound) # Final shape: [3, 224, 224]
+            sound = self.transform(sound)
             
         return sound, label
 
-# --- The rest of the script is identical to your final train/test script ---
-# SpecAugment and evaluate functions remain the same
 class SpecAugment(nn.Module):
     def __init__(self, freq_mask_param=40, time_mask_param=70, num_freq_masks=1, num_time_masks=1):
         super(SpecAugment, self).__init__()
@@ -112,7 +95,6 @@ class SpecAugment(nn.Module):
         self.num_freq_masks = num_freq_masks
         self.num_time_masks = num_time_masks
     def forward(self, x):
-        # Implementation is the same...
         for _ in range(self.num_freq_masks):
             f = np.random.uniform(0, self.freq_mask_param); f0 = np.random.uniform(0, x.shape[2] - f); x[:, :, int(f0):int(f0 + f), :] = 0
         for _ in range(self.num_time_masks):
@@ -120,27 +102,26 @@ class SpecAugment(nn.Module):
         return x
 
 @torch.no_grad()
-def evaluate(data_loader, net, criterion, class_names, device, set_name="Validation", print_report=False):
-    # Implementation is the same...
-    net.eval(); loss_sum, correct, total = 0.0, 0, 0; all_preds, all_labels = [], []
+def evaluate(data_loader, net, criterion, device, set_name="Validation"):
+    net.eval()
+    loss_sum, correct, total = 0.0, 0, 0
     for imgs, labels in data_loader:
         imgs, labels = imgs.to(device), labels.to(device)
         with torch.amp.autocast(device_type=device):
-            out = net(imgs); loss = criterion(out, labels)
-        loss_sum += loss.item() * imgs.size(0); preds = out.argmax(dim=1); all_preds.extend(preds.cpu().numpy())
-        all_labels.extend(labels.cpu().numpy()); correct += (preds == labels).sum().item(); total += labels.size(0)
-    avg_loss = loss_sum / total; acc = 100.0 * correct / total; f1 = f1_score(all_labels, all_preds, average="weighted", zero_division=0)
-    if print_report:
-        print(f"\n--- FINAL REPORT ON {set_name.upper()} SET ---")
-        print(f"{set_name} Loss: {avg_loss:.4f} | {set_name} Acc: {acc:.2f}% | {set_name} F1: {f1:.4f}")
-        print("\nConfusion Matrix:\n", confusion_matrix(all_labels, all_preds))
-        print("\nClassification Report:\n", classification_report(all_labels, all_preds, target_names=class_names, zero_division=0))
-    return avg_loss, acc, f1
+            out = net(imgs)
+            loss = criterion(out, labels)
+        loss_sum += loss.item() * imgs.size(0)
+        preds = out.argmax(dim=1)
+        correct += (preds == labels).sum().item()
+        total += labels.size(0)
+    
+    avg_loss = loss_sum / total
+    acc = 100.0 * correct / total
+    return avg_loss, acc
 
 if __name__ == '__main__':
     train_ds = OfflineAudioDataset(root_dir=TRAIN_DIR, transform=train_transform)
     val_ds = OfflineAudioDataset(root_dir=VAL_DIR, transform=val_transform)
-    test_ds = OfflineAudioDataset(root_dir=TEST_DIR, transform=test_transform)
     
     labels = [label for _, label in train_ds.samples]
     class_counts = Counter(labels)
@@ -149,13 +130,12 @@ if __name__ == '__main__':
 
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=sampler)
     val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False)
-    test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False)
-
+    
     class_names = list(train_ds.class_to_idx.keys())
     NUM_CLASSES = len(class_names)
     print(f"Using device: {DEVICE}")
     print(f"Found {NUM_CLASSES} classes: {', '.join(class_names)}")
-    print(f"Train samples: {len(train_ds)} | Validation samples: {len(val_ds)} | Test samples: {len(test_ds)}\n")
+    print(f"Train samples: {len(train_ds)} | Validation samples: {len(val_ds)}\n")
 
     model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
     for param in model.parameters(): param.requires_grad = True
@@ -174,35 +154,52 @@ if __name__ == '__main__':
     patience_counter = 0
 
     for epoch in range(1, EPOCHS + 1):
-        # The training loop is exactly the same...
-        model.train(); running_loss, running_correct, running_samples = 0.0, 0, 0
+        model.train()
+        running_loss, running_correct, running_samples = 0.0, 0, 0
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{EPOCHS}")
         for imgs, labels in pbar:
-            imgs, labels = imgs.to(DEVICE), labels.to(DEVICE); augmented_imgs = spec_augmenter(imgs); optimizer.zero_grad()
-            with torch.amp.autocast(device_type=DEVICE): out = model(augmented_imgs); loss = criterion(out, labels)
-            scaler.scale(loss).backward(); scaler.step(optimizer); scaler.update()
-            running_loss += loss.item() * imgs.size(0); preds = out.argmax(dim=1); running_correct += (preds == labels).sum().item()
-            running_samples += imgs.size(0); pbar.set_postfix(loss=f"{loss.item():.4f}", acc=f"{100*running_correct/running_samples:.2f}%")
-        train_loss = running_loss / running_samples; train_acc = 100.0 * running_correct / running_samples
-        val_loss, val_acc, _ = evaluate(val_loader, model, criterion, class_names, DEVICE, set_name="Validation")
+            imgs, labels = imgs.to(DEVICE), labels.to(DEVICE)
+            augmented_imgs = spec_augmenter(imgs)
+            optimizer.zero_grad()
+            with torch.amp.autocast(device_type=DEVICE):
+                out = model(augmented_imgs)
+                loss = criterion(out, labels)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            
+            running_loss += loss.item() * imgs.size(0)
+            preds = out.argmax(dim=1)
+            running_correct += (preds == labels).sum().item()
+            running_samples += imgs.size(0)
+            pbar.set_postfix(loss=f"{loss.item():.4f}", acc=f"{100*running_correct/running_samples:.2f}%")
+            
+        train_loss = running_loss / running_samples
+        train_acc = 100.0 * running_correct / running_samples
+        
+        val_loss, val_acc = evaluate(val_loader, model, criterion, DEVICE, set_name="Validation")
+        
         scheduler.step()
+        
         print(f"Epoch {epoch}: Train Loss={train_loss:.4f}, Acc={train_acc:.2f}% | Val Loss={val_loss:.4f}, Acc={val_acc:.2f}%")
-        if epoch % 10 == 0:
-            test_loss, test_acc, _ = evaluate(test_loader, model, criterion, class_names, DEVICE, set_name="Test")
-            print(f"    -> Periodic Test Check @ Epoch {epoch}: Test Loss={test_loss:.4f}, Test Acc={test_acc:.2f}%")
+
         if val_loss < best_val_loss - MIN_DELTA:
-            best_val_loss = val_loss; patience_counter = 0; torch.save(model.state_dict(), CHECKPOINT_PATH)
-            print(f"  -> Saved improved checkpoint (val_loss={val_loss:.4f})")
+            best_val_loss = val_loss
+            patience_counter = 0
+            torch.save(model.state_dict(), CHECKPOINT_PATH)
+            print(f"   -> Saved improved checkpoint (val_loss={val_loss:.4f}) to {CHECKPOINT_PATH}")
         else:
-            patience_counter += 1; print(f"  -> No improvement. Patience {patience_counter}/{PATIENCE}")
+            patience_counter += 1
+            print(f"   -> No improvement. Patience {patience_counter}/{PATIENCE}")
+            
         if patience_counter >= PATIENCE:
-            print(f"\nEarly stopping triggered at epoch {epoch}"); break
+            print(f"\nEarly stopping triggered at epoch {epoch}")
+            break
     
     print("\n--- Training Complete ---")
     if Path(CHECKPOINT_PATH).exists():
-        print(f"Loading best model from {CHECKPOINT_PATH} for final evaluation on the TEST set.")
-        model.load_state_dict(torch.load(CHECKPOINT_PATH))
-        evaluate(test_loader, model, criterion, class_names, DEVICE, set_name="Test", print_report=True)
+        print(f"Best model saved to {CHECKPOINT_PATH} based on validation loss.")
     else:
-        print("No checkpoint was saved.")
+        print("Training finished, but no checkpoint was saved.")
+    
     print("\n✅ Done.")
