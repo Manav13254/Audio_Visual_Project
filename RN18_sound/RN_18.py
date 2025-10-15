@@ -23,7 +23,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 BASE_DIR = Path("/home/23ucs671/audio_visual_proj1/preprocessed_features_80_20")
 TRAIN_DIR = BASE_DIR / "train"
 VAL_DIR = BASE_DIR / "val"
-CHECKPOINT_PATH = "best_finetuned_rn18_model(offline).pt"
+CHECKPOINT_PATH = "best_finetuned_rn18_model_(offline).pt"
 
 normalizer = np.load(BASE_DIR / "normalizer.npy")
 mu, sigma = normalizer[0], normalizer[1]
@@ -150,7 +150,12 @@ if __name__ == '__main__':
     optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
     scaler = torch.amp.GradScaler(enabled=(DEVICE == "cuda"))
     scheduler = CosineAnnealingLR(optimizer, T_max=EPOCHS)
+    
+    # --- Variables to track best metrics ---
     best_val_loss = float("inf")
+    best_val_acc = 0.0
+    best_train_loss = float("inf")
+    best_train_acc = 0.0
     patience_counter = 0
 
     for epoch in range(1, EPOCHS + 1):
@@ -185,12 +190,16 @@ if __name__ == '__main__':
 
         if val_loss < best_val_loss - MIN_DELTA:
             best_val_loss = val_loss
+            # --- Store the best metrics from this epoch ---
+            best_val_acc = val_acc
+            best_train_loss = train_loss
+            best_train_acc = train_acc
             patience_counter = 0
             torch.save(model.state_dict(), CHECKPOINT_PATH)
-            print(f"   -> Saved improved checkpoint (val_loss={val_loss:.4f}) to {CHECKPOINT_PATH}")
+            print(f"    -> Saved improved checkpoint (val_loss={val_loss:.4f}) to {CHECKPOINT_PATH}")
         else:
             patience_counter += 1
-            print(f"   -> No improvement. Patience {patience_counter}/{PATIENCE}")
+            print(f"    -> No improvement. Patience {patience_counter}/{PATIENCE}")
             
         if patience_counter >= PATIENCE:
             print(f"\nEarly stopping triggered at epoch {epoch}")
@@ -199,6 +208,39 @@ if __name__ == '__main__':
     print("\n--- Training Complete ---")
     if Path(CHECKPOINT_PATH).exists():
         print(f"Best model saved to {CHECKPOINT_PATH} based on validation loss.")
+        
+        # --- Print the best recorded metrics from training ---
+        print("\n--- Best Metrics (from epoch with lowest validation loss) ---")
+        print(f"Train Loss: {best_train_loss:.4f}")
+        print(f"Train Acc:  {best_train_acc:.2f}%")
+        print(f"Val Loss:   {best_val_loss:.4f}")
+        print(f"Val Acc:    {best_val_acc:.2f}%")
+        
+        # --- Evaluate the best model and calculate F1 score ---
+        print("\n--- Final Evaluation on Validation Set (using best model) ---")
+        model.load_state_dict(torch.load(CHECKPOINT_PATH))
+        model.eval()
+        
+        all_preds = []
+        all_labels = []
+        
+        with torch.no_grad():
+            for imgs, labels in val_loader:
+                imgs = imgs.to(DEVICE)
+                with torch.amp.autocast(device_type=DEVICE):
+                    out = model(imgs)
+                preds = out.argmax(dim=1)
+                all_preds.extend(preds.cpu().numpy())
+                all_labels.extend(labels.cpu().numpy())
+
+        # --- Calculate and print F1 score and classification report ---
+        f1 = f1_score(all_labels, all_preds, average='weighted')
+        print(f"Weighted F1 Score: {f1:.4f}\n")
+        
+        print("Classification Report:")
+        report = classification_report(all_labels, all_preds, target_names=class_names, digits=4)
+        print(report)
+
     else:
         print("Training finished, but no checkpoint was saved.")
     
