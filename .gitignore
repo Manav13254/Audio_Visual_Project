@@ -15,3 +15,9 @@ data/
 ADVANCE_DATA_split/
 ADVANCE_Features/
 *.pth
+
+# from remote
+preprocessed_features_80_20/
+sound/
+vision/
+ADVANCE_images_split/
