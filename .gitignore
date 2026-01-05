@@ -9,3 +9,9 @@ __pycache__/
 *mlruns/
 best_lora_rn18_model/
 final_data_split/
+final_data_split_80_20/
+preprocessed_features/
+data/
+ADVANCE_DATA_split/
+ADVANCE_Features/
+*.pth
